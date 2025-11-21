@@ -9,8 +9,8 @@ import threading
 from pathlib import Path
 
 # === Telegram 設定 ===
-BOT_TOKEN = "8262097219:AAGEtNSYY81GrtupVILIxqTA2rnt7Z0woUo"
-CHAT_ID = "8414393276"
+BOT_TOKEN = "8559295076:AAG-FeyHD6vMSWTXsskbuguY3GhRgMQcxAY"
+CHAT_ID = "8207833130"
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 # === 台指期即時行情 URL ===
