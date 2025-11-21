@@ -495,11 +495,23 @@ def main():
     last_record_time = None
     data_ready = False
     last_analysis_time = datetime.now()
+    last_heartbeat = datetime.now()  # 心跳計時器
+    loop_count = 0  # 循環計數器
     
     while True:
+        loop_count += 1
+        
+        # 每 60 秒顯示一次心跳訊息
+        if (datetime.now() - last_heartbeat).total_seconds() >= 60:
+            print(f"💓 心跳 #{loop_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 監控運行中...")
+            last_heartbeat = datetime.now()
+        
         timestamp, price, current_ref = fetch_latest_price()
         
         if price:
+            # 每次成功抓取價格時顯示（前 10 次）
+            if loop_count <= 10:
+                print(f"📊 [{loop_count}] 抓取價格: {price:,.0f} | {timestamp.strftime('%H:%M:%S')}")
             should_record = False
             
             if last_price is None or price != last_price:
@@ -524,7 +536,13 @@ def main():
             
             if not data_ready:
                 data_ready = True
-                print("✅ 資料量已足夠，開始監控！\n")
+                print("\n" + "=" * 60)
+                print("✅ 資料量已足夠，開始監控！")
+                print("=" * 60)
+                print(f"📊 當前有 {len(df_5min)} 根 5 分鐘 K 棒")
+                print(f"📈 最新價格: {price:,.0f}")
+                print(f"⚙️ 監控參數: slope={params.slope_threshold}, lookback={params.lookback}")
+                print("=" * 60 + "\n")
             
             df_5min = calc_macd(df_5min)
             
@@ -541,6 +559,15 @@ def main():
             
             # 檢查背離訊號
             alert, signal_data = check_divergence(df_5min)
+            
+            # 每 3 分鐘顯示一次詳細狀態
+            if data_ready and loop_count % 60 == 0:  # 每 60 個循環（約 3 分鐘）
+                macd_val = signal_data['hist_now'] if signal_data else 0
+                print(f"📊 {datetime.now().strftime('%H:%M:%S')} | "
+                      f"價格: {price:,.0f} | "
+                      f"K棒: {len(df_5min)} | "
+                      f"MACD: {macd_val:+.2f} | "
+                      f"循環: #{loop_count}")
             
             now = datetime.now()
             cooldown = timedelta(minutes=params.cooldown_minutes)
@@ -570,6 +597,40 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     return "Service is running (AI Learning Version)", 200
+
+@app.route("/health")
+def health():
+    """健康檢查端點 - 快速回應"""
+    return {"status": "ok", "service": "macd-monitor", "timestamp": datetime.now().isoformat()}, 200
+
+@app.route("/heartbeat")
+def heartbeat():
+    """心跳檢查 - 確認服務持續運行"""
+    current_time = datetime.now()
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>心跳監控</title>
+        <meta http-equiv="refresh" content="10">
+        <style>
+            body {{ font-family: monospace; background: #1e1e1e; color: #00ff00; padding: 20px; }}
+            .pulse {{ animation: pulse 1s infinite; }}
+            @keyframes pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} }}
+            .time {{ font-size: 2em; margin: 20px 0; }}
+        </style>
+    </head>
+    <body>
+        <h1><span class="pulse">💚</span> 系統心跳監控</h1>
+        <div class="time">⏰ {current_time.strftime('%Y-%m-%d %H:%M:%S')}</div>
+        <p>✅ 服務正常運行</p>
+        <p>🔄 每 10 秒自動刷新</p>
+        <p>💡 如果時間停止更新，表示服務已關閉</p>
+        <hr>
+        <p><a href="/" style="color: #00ff00;">返回首頁</a></p>
+    </body>
+    </html>
+    """, 200
 
 @app.route("/signals")
 def view_signals():
@@ -633,12 +694,37 @@ def run_bot():
     main()
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_bot)
+    print("\n" + "=" * 70)
+    print("🚀 MACD 監控系統啟動中...")
+    print("=" * 70)
+    print(f"⏰ 啟動時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("🌐 Flask 服務準備中...")
+    print("=" * 70 + "\n")
+    
+    # 延遲啟動監控執行緒，避免啟動超時
+    def delayed_start():
+        import time
+        time.sleep(5)  # 等待 Flask 完全啟動
+        print("\n" + "=" * 70)
+        print("🤖 監控執行緒啟動中...")
+        print("=" * 70 + "\n")
+        main()
+    
+    t = threading.Thread(target=delayed_start)
     t.daemon = True
     t.start()
     
-    t2 = threading.Thread(target=keep_alive, args=("https://macd-rx43.onrender.com",))
+    # Keep-alive 也延遲啟動
+    def delayed_keepalive():
+        import time
+        time.sleep(10)
+        print("🔄 Keep-alive 功能啟動（每 10 分鐘自動喚醒）")
+        keep_alive("https://danny-macd.onrender.com")
+    
+    t2 = threading.Thread(target=delayed_keepalive)
     t2.daemon = True
     t2.start()
 
+    print("✅ Flask 服務準備就緒，開始監聽 port 10000...")
+    print("=" * 70 + "\n")
     app.run(host="0.0.0.0", port=10000)
