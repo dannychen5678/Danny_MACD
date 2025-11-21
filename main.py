@@ -480,13 +480,15 @@ def optimize_parameters(stats):
 
 # === 主程式 ===
 def main():
-    print("=" * 60)
-    print("🤖 開始監控台指期 MACD 背離訊號（AI 自動學習版）")
-    print("=" * 60)
-    print("📌 指標系統：標準 MACD (12, 26, 9)")
-    print("📌 學習功能：自動收集數據、分析勝率、優化參數")
-    print(f"📌 當前參數：slope={params.slope_threshold}, lookback={params.lookback}")
-    print("=" * 60 + "\n")
+    import sys
+    print("=" * 60, flush=True)
+    print("🤖 開始監控台指期 MACD 背離訊號（AI 自動學習版）", flush=True)
+    print("=" * 60, flush=True)
+    print("📌 指標系統：標準 MACD (12, 26, 9)", flush=True)
+    print("� 學習功能：：自動收集數據、分析勝率、優化參數", flush=True)
+    print(f"📌 當前參數：slope={params.slope_threshold}, lookback={params.lookback}", flush=True)
+    print("=" * 60 + "\n", flush=True)
+    sys.stdout.flush()
     
     df_tick = pd.DataFrame(columns=['Close'])
     last_alert = None
@@ -501,17 +503,27 @@ def main():
     while True:
         loop_count += 1
         
-        # 每 60 秒顯示一次心跳訊息
+        # 每 60 秒顯示一次心跳訊息（無論是否有價格）
         if (datetime.now() - last_heartbeat).total_seconds() >= 60:
-            print(f"💓 心跳 #{loop_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 監控運行中...")
+            import sys
+            print(f"💓 心跳 #{loop_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 監控運行中...", flush=True)
+            sys.stdout.flush()
             last_heartbeat = datetime.now()
         
         timestamp, price, current_ref = fetch_latest_price()
         
+        # 如果沒有價格，顯示警告（前 5 次）
+        if not price and loop_count <= 5:
+            import sys
+            print(f"⚠️ [{loop_count}] 無法取得價格 | {datetime.now().strftime('%H:%M:%S')} | 可能是休市時間", flush=True)
+            sys.stdout.flush()
+        
         if price:
             # 每次成功抓取價格時顯示（前 10 次）
             if loop_count <= 10:
-                print(f"📊 [{loop_count}] 抓取價格: {price:,.0f} | {timestamp.strftime('%H:%M:%S')}")
+                import sys
+                print(f"📊 [{loop_count}] 抓取價格: {price:,.0f} | {timestamp.strftime('%H:%M:%S')}", flush=True)
+                sys.stdout.flush()
             should_record = False
             
             if last_price is None or price != last_price:
@@ -694,36 +706,64 @@ def run_bot():
     main()
 
 if __name__ == "__main__":
-    print("\n" + "=" * 70)
-    print("🚀 MACD 監控系統啟動中...")
-    print("=" * 70)
-    print(f"⏰ 啟動時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("🌐 Flask 服務準備中...")
-    print("=" * 70 + "\n")
+    import sys
+    current_time = datetime.now()
+    print("\n" + "=" * 70, flush=True)
+    print("🚀 MACD 監控系統啟動中...", flush=True)
+    print("=" * 70, flush=True)
+    print(f"⏰ 啟動時間: {current_time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"📅 星期: {['一', '二', '三', '四', '五', '六', '日'][current_time.weekday()]}", flush=True)
+    
+    # 判斷交易時段
+    current_hour = current_time.hour
+    if 8 <= current_hour < 14:
+        print("🕐 當前時段: 日盤交易時間 (08:45-13:45)", flush=True)
+    elif 15 <= current_hour or current_hour < 5:
+        print("🌙 當前時段: 夜盤交易時間 (15:00-05:00)", flush=True)
+    else:
+        print("😴 當前時段: 休市時間", flush=True)
+    
+    print("🌐 Flask 服務準備中...", flush=True)
+    print("=" * 70 + "\n", flush=True)
+    sys.stdout.flush()
     
     # 延遲啟動監控執行緒，避免啟動超時
     def delayed_start():
         import time
+        import sys
         time.sleep(5)  # 等待 Flask 完全啟動
-        print("\n" + "=" * 70)
-        print("🤖 監控執行緒啟動中...")
-        print("=" * 70 + "\n")
-        main()
+        print("\n" + "=" * 70, flush=True)
+        print("🤖 監控執行緒啟動中...", flush=True)
+        print("=" * 70 + "\n", flush=True)
+        sys.stdout.flush()  # 強制輸出
+        try:
+            main()
+        except Exception as e:
+            print(f"❌ 監控執行緒錯誤: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
     
-    t = threading.Thread(target=delayed_start)
+    t = threading.Thread(target=delayed_start, name="MonitorThread")
     t.daemon = True
     t.start()
+    print(f"✅ 監控執行緒已建立 (Thread ID: {t.ident})", flush=True)
     
     # Keep-alive 也延遲啟動
     def delayed_keepalive():
         import time
+        import sys
         time.sleep(10)
-        print("🔄 Keep-alive 功能啟動（每 10 分鐘自動喚醒）")
-        keep_alive("https://danny-macd.onrender.com")
+        print("🔄 Keep-alive 功能啟動（每 10 分鐘自動喚醒）", flush=True)
+        sys.stdout.flush()
+        try:
+            keep_alive("https://danny-macd.onrender.com")
+        except Exception as e:
+            print(f"❌ Keep-alive 錯誤: {e}", flush=True)
     
-    t2 = threading.Thread(target=delayed_keepalive)
+    t2 = threading.Thread(target=delayed_keepalive, name="KeepAliveThread")
     t2.daemon = True
     t2.start()
+    print(f"✅ Keep-alive 執行緒已建立 (Thread ID: {t2.ident})", flush=True)
 
     print("✅ Flask 服務準備就緒，開始監聽 port 10000...")
     print("=" * 70 + "\n")
