@@ -3,10 +3,14 @@ import pandas as pd
 import numpy as np
 import time
 import json
+import os
 from datetime import datetime, timedelta
 from flask import Flask
 import threading
 from pathlib import Path
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 # === Telegram 設定 ===
 BOT_TOKEN = "8559295076:AAG-FeyHD6vMSWTXsskbuguY3GhRgMQcxAY"
@@ -16,12 +20,54 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 # === 台指期即時行情 URL ===
 URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
 
-# === 數據儲存路徑 ===
+# === 資料庫設定 ===
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///macd_data.db')
+# Render 的 PostgreSQL URL 格式修正
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
+Base = declarative_base()
+
+# 資料庫模型
+class SignalLog(Base):
+    __tablename__ = 'signal_logs'
+    
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, nullable=False)
+    signal_type = Column(String(100), nullable=False)
+    entry_price = Column(Float, nullable=False)
+    slope = Column(Float)
+    hist_avg = Column(Float)
+    hist_now = Column(Float)
+    price_range = Column(Float)
+    slope_threshold = Column(Float)
+    lookback = Column(Integer)
+    price_10min = Column(Float)
+    price_30min = Column(Float)
+    price_1hour = Column(Float)
+    result = Column(String(20))
+    profit_loss = Column(Float)
+    threshold_used = Column(Float)
+
+class Parameters(Base):
+    __tablename__ = 'parameters'
+    
+    id = Column(Integer, primary_key=True)
+    slope_threshold = Column(Float, nullable=False)
+    lookback = Column(Integer, nullable=False)
+    hist_confirm_bars = Column(Integer, nullable=False)
+    cooldown_minutes = Column(Integer, nullable=False)
+    last_update = Column(DateTime, nullable=False)
+
+# 建立資料庫連線
+engine = create_engine(DATABASE_URL)
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+
+# 備用本地儲存（如果資料庫連線失敗）
 DATA_DIR = Path("macd_data")
 DATA_DIR.mkdir(exist_ok=True)
-SIGNAL_LOG_FILE = DATA_DIR / "signal_log.csv"
 PARAMS_FILE = DATA_DIR / "parameters.json"
-STATS_FILE = DATA_DIR / "statistics.json"
 
 # === 動態參數（會自動調整） ===
 class DynamicParams:
@@ -34,27 +80,53 @@ class DynamicParams:
         self.load_params()
     
     def load_params(self):
-        """載入已儲存的參數"""
-        if PARAMS_FILE.exists():
-            with open(PARAMS_FILE, 'r') as f:
-                params = json.load(f)
-                self.slope_threshold = params.get('slope_threshold', 3.0)
-                self.lookback = params.get('lookback', 10)
-                self.hist_confirm_bars = params.get('hist_confirm_bars', 3)
-                self.cooldown_minutes = params.get('cooldown_minutes', 5)
-                print(f"✅ 載入已儲存的參數: slope={self.slope_threshold}, lookback={self.lookback}")
+        """載入已儲存的參數（從資料庫）"""
+        try:
+            session = Session()
+            param = session.query(Parameters).order_by(Parameters.last_update.desc()).first()
+            if param:
+                self.slope_threshold = param.slope_threshold
+                self.lookback = param.lookback
+                self.hist_confirm_bars = param.hist_confirm_bars
+                self.cooldown_minutes = param.cooldown_minutes
+                print(f"✅ 從資料庫載入參數: slope={self.slope_threshold}, lookback={self.lookback}")
+            session.close()
+        except Exception as e:
+            print(f"⚠️ 資料庫載入失敗，使用預設參數: {e}")
+            # 備用：從本地檔案載入
+            if PARAMS_FILE.exists():
+                with open(PARAMS_FILE, 'r') as f:
+                    params = json.load(f)
+                    self.slope_threshold = params.get('slope_threshold', 3.0)
+                    self.lookback = params.get('lookback', 10)
     
     def save_params(self):
-        """儲存參數"""
-        params = {
-            'slope_threshold': self.slope_threshold,
-            'lookback': self.lookback,
-            'hist_confirm_bars': self.hist_confirm_bars,
-            'cooldown_minutes': self.cooldown_minutes,
-            'last_update': datetime.now().isoformat()
-        }
-        with open(PARAMS_FILE, 'w') as f:
-            json.dump(params, f, indent=2)
+        """儲存參數（到資料庫）"""
+        try:
+            session = Session()
+            param = Parameters(
+                slope_threshold=self.slope_threshold,
+                lookback=self.lookback,
+                hist_confirm_bars=self.hist_confirm_bars,
+                cooldown_minutes=self.cooldown_minutes,
+                last_update=datetime.now()
+            )
+            session.add(param)
+            session.commit()
+            session.close()
+            print(f"✅ 參數已儲存到資料庫")
+        except Exception as e:
+            print(f"⚠️ 資料庫儲存失敗: {e}")
+            # 備用：儲存到本地檔案
+            params = {
+                'slope_threshold': self.slope_threshold,
+                'lookback': self.lookback,
+                'hist_confirm_bars': self.hist_confirm_bars,
+                'cooldown_minutes': self.cooldown_minutes,
+                'last_update': datetime.now().isoformat()
+            }
+            with open(PARAMS_FILE, 'w') as f:
+                json.dump(params, f, indent=2)
 
 params = DynamicParams()
 
@@ -206,37 +278,24 @@ def check_divergence(df):
 
 # === 階段 1：數據收集 ===
 def record_signal(signal_type, price, signal_data, df_5min):
-    """記錄訊號到 CSV"""
+    """記錄訊號到資料庫"""
     try:
-        # 準備記錄資料
-        record = {
-            'timestamp': datetime.now().isoformat(),
-            'signal_type': signal_type,
-            'entry_price': price,
-            'slope': signal_data['slope'],
-            'hist_avg': signal_data['hist_avg'],
-            'hist_now': signal_data['hist_now'],
-            'price_range': signal_data['price_range'],
-            'slope_threshold': params.slope_threshold,
-            'lookback': params.lookback,
-            # 結果欄位（稍後更新）
-            'price_10min': None,
-            'price_30min': None,
-            'price_1hour': None,
-            'result': None,
-            'profit_loss': None,
-            'threshold_used': None  # 記錄使用的動態門檻
-        }
-        
-        # 寫入 CSV
-        df_log = pd.DataFrame([record])
-        
-        if SIGNAL_LOG_FILE.exists():
-            df_log.to_csv(SIGNAL_LOG_FILE, mode='a', header=False, index=False)
-        else:
-            df_log.to_csv(SIGNAL_LOG_FILE, mode='w', header=True, index=False)
-        
-        print(f"✅ 訊號已記錄到: {SIGNAL_LOG_FILE}")
+        session = Session()
+        signal = SignalLog(
+            timestamp=datetime.now(),
+            signal_type=signal_type,
+            entry_price=price,
+            slope=float(signal_data['slope']),
+            hist_avg=float(signal_data['hist_avg']),
+            hist_now=float(signal_data['hist_now']),
+            price_range=float(signal_data['price_range']),
+            slope_threshold=params.slope_threshold,
+            lookback=params.lookback
+        )
+        session.add(signal)
+        session.commit()
+        session.close()
+        print(f"✅ 訊號已記錄到資料庫: {signal_type}")
         
     except Exception as e:
         print(f"❌ 記錄訊號失敗: {e}")
@@ -244,90 +303,76 @@ def record_signal(signal_type, price, signal_data, df_5min):
 def update_signal_results(df_5min):
     """更新訊號結果（追蹤價格變化）"""
     try:
-        if not SIGNAL_LOG_FILE.exists():
-            return
-        
-        df_log = pd.read_csv(SIGNAL_LOG_FILE)
-        df_log['timestamp'] = pd.to_datetime(df_log['timestamp'])
-        
+        session = Session()
         current_time = datetime.now()
-        current_price = df_5min['close'].iloc[-1]
+        current_price = float(df_5min['close'].iloc[-1])
         
-        updated = False
+        # 查詢所有未完成的訊號
+        pending_signals = session.query(SignalLog).filter(SignalLog.result == None).all()
         
-        for idx, row in df_log.iterrows():
-            if pd.notna(row['result']):
-                continue  # 已經有結果了
-            
-            signal_time = row['timestamp']
-            time_diff = (current_time - signal_time).total_seconds() / 60
+        for signal in pending_signals:
+            time_diff = (current_time - signal.timestamp).total_seconds() / 60
             
             # 更新 10 分鐘後價格
-            if pd.isna(row['price_10min']) and time_diff >= 10:
-                df_log.at[idx, 'price_10min'] = current_price
-                updated = True
+            if signal.price_10min is None and time_diff >= 10:
+                signal.price_10min = current_price
             
             # 更新 30 分鐘後價格
-            if pd.isna(row['price_30min']) and time_diff >= 30:
-                df_log.at[idx, 'price_30min'] = current_price
-                updated = True
+            if signal.price_30min is None and time_diff >= 30:
+                signal.price_30min = current_price
             
             # 更新 1 小時後價格並判斷結果
-            if pd.isna(row['price_1hour']) and time_diff >= 60:
-                df_log.at[idx, 'price_1hour'] = current_price
+            if signal.price_1hour is None and time_diff >= 60:
+                signal.price_1hour = current_price
                 
                 # 判斷訊號結果
-                entry_price = row['entry_price']
-                signal_type = row['signal_type']
-                
-                if '看多' in signal_type or '轉多' in signal_type:
-                    profit_loss = current_price - entry_price
+                if '看多' in signal.signal_type or '轉多' in signal.signal_type:
+                    profit_loss = current_price - signal.entry_price
                 else:  # 看空
-                    profit_loss = entry_price - current_price
+                    profit_loss = signal.entry_price - current_price
                 
-                df_log.at[idx, 'profit_loss'] = profit_loss
+                signal.profit_loss = profit_loss
                 
-                # === 動態門檻：根據價格波動調整 ===
-                price_range = row['price_range']
-                
-                # 計算動態門檻（波動的 25-35%）
-                # 最小 20 點，最大 50 點
-                dynamic_threshold = max(20, min(50, price_range * 0.3))
+                # 動態門檻
+                dynamic_threshold = max(20, min(50, signal.price_range * 0.3))
                 
                 # 判斷成功或失敗
                 if profit_loss > dynamic_threshold:
-                    df_log.at[idx, 'result'] = 'success'
+                    signal.result = 'success'
                 elif profit_loss < -dynamic_threshold:
-                    df_log.at[idx, 'result'] = 'fail'
+                    signal.result = 'fail'
                 else:
-                    df_log.at[idx, 'result'] = 'neutral'
+                    signal.result = 'neutral'
                 
-                # 記錄使用的門檻（用於分析）
-                df_log.at[idx, 'threshold_used'] = dynamic_threshold
-                
-                updated = True
+                signal.threshold_used = dynamic_threshold
+                print(f"✅ 訊號結果已更新: {signal.signal_type} -> {signal.result}")
         
-        if updated:
-            df_log.to_csv(SIGNAL_LOG_FILE, index=False)
-            print(f"✅ 訊號結果已更新")
+        session.commit()
+        session.close()
         
     except Exception as e:
         print(f"❌ 更新訊號結果失敗: {e}")
 
 # === 階段 2：結果分析 ===
 def analyze_signals():
-    """分析訊號勝率"""
+    """分析訊號勝率（從資料庫）"""
     try:
-        if not SIGNAL_LOG_FILE.exists():
+        session = Session()
+        
+        # 查詢所有已完成的訊號
+        completed_signals = session.query(SignalLog).filter(SignalLog.result != None).all()
+        
+        if len(completed_signals) == 0:
+            session.close()
             return None
         
-        df_log = pd.read_csv(SIGNAL_LOG_FILE)
-        
-        # 只分析有結果的訊號
-        df_completed = df_log[df_log['result'].notna()]
-        
-        if len(df_completed) == 0:
-            return None
+        # 轉換為 DataFrame 方便分析
+        data = [{
+            'signal_type': s.signal_type,
+            'result': s.result,
+            'profit_loss': s.profit_loss
+        } for s in completed_signals]
+        df_completed = pd.DataFrame(data)
         
         stats = {
             'total_signals': len(df_completed),
@@ -354,10 +399,7 @@ def analyze_signals():
                 'avg_profit': df_type['profit_loss'].mean()
             }
         
-        # 儲存統計資料
-        with open(STATS_FILE, 'w') as f:
-            json.dump(stats, f, indent=2)
-        
+        session.close()
         return stats
         
     except Exception as e:
@@ -528,6 +570,64 @@ app = Flask(__name__)
 @app.route("/")
 def home():
     return "Service is running (AI Learning Version)", 200
+
+@app.route("/signals")
+def view_signals():
+    """查看所有訊號記錄"""
+    try:
+        session = Session()
+        signals = session.query(SignalLog).order_by(SignalLog.timestamp.desc()).limit(50).all()
+        
+        html = "<h1>MACD 訊號記錄（最近 50 筆）</h1>"
+        html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+        html += "<tr><th>時間</th><th>訊號類型</th><th>進場價</th><th>結果</th><th>損益</th></tr>"
+        
+        for s in signals:
+            result_color = {
+                'success': 'green',
+                'fail': 'red',
+                'neutral': 'orange',
+                None: 'gray'
+            }.get(s.result, 'gray')
+            
+            html += f"<tr>"
+            html += f"<td>{s.timestamp.strftime('%Y-%m-%d %H:%M')}</td>"
+            html += f"<td>{s.signal_type}</td>"
+            html += f"<td>{s.entry_price:,.0f}</td>"
+            html += f"<td style='color: {result_color}'>{s.result or '進行中'}</td>"
+            html += f"<td>{s.profit_loss:+.1f if s.profit_loss else '-'}</td>"
+            html += f"</tr>"
+        
+        html += "</table>"
+        session.close()
+        return html
+    except Exception as e:
+        return f"Error: {e}", 500
+
+@app.route("/stats")
+def view_stats():
+    """查看統計資料"""
+    try:
+        stats = analyze_signals()
+        if not stats:
+            return "<h1>尚無統計資料</h1>", 200
+        
+        html = "<h1>📊 訊號統計報告</h1>"
+        html += f"<p>總訊號數: {stats['total_signals']}</p>"
+        html += f"<p>成功: {stats['success_count']} | 失敗: {stats['fail_count']} | 中性: {stats['neutral_count']}</p>"
+        html += f"<p>整體勝率: {stats['success_rate']:.1f}%</p>"
+        html += f"<p>平均損益: {stats['avg_profit']:+.1f} 點</p>"
+        
+        html += "<h2>各類訊號表現:</h2><ul>"
+        for signal_type, data in stats['by_signal_type'].items():
+            html += f"<li><b>{signal_type}</b>: "
+            html += f"數量 {data['total']} | 勝率 {data['success_rate']:.1f}% | "
+            html += f"平均損益 {data['avg_profit']:+.1f} 點</li>"
+        html += "</ul>"
+        
+        return html
+    except Exception as e:
+        return f"Error: {e}", 500
 
 def run_bot():
     main()
